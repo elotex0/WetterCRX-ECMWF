@@ -1,83 +1,40 @@
 import sys
-import cfgrib
-import matplotlib.pyplot as plt
-import cartopy.crs as ccrs
-import cartopy.feature as cfeature
-import pandas as pd
 import os
-from adjustText import adjust_text
-import matplotlib.colors as mcolors
-import matplotlib.patches as mpatches
-import matplotlib.patheffects as path_effects
-from scipy.interpolate import RegularGridInterpolator
-from zoneinfo import ZoneInfo
-import numpy as np
-from matplotlib.colors import ListedColormap, BoundaryNorm, LinearSegmentedColormap
-import warnings
+import struct
+import zlib
+import datetime as dt
 
-warnings.simplefilter(action='ignore', category=FutureWarning)
+import numpy as np
+from scipy.interpolate import RegularGridInterpolator
+import matplotlib
+matplotlib.use("Agg")
+from matplotlib.colors import ListedColormap, BoundaryNorm, LinearSegmentedColormap
+import matplotlib.colors as mcolors
+from PIL import Image
+from omfiles import OmFileReader
 
 # ------------------------------
 # Eingabe-/Ausgabe
 # ------------------------------
 data_dir = sys.argv[1]        # z.B. "output"
 output_dir = sys.argv[2]      # z.B. "output/maps"
-var_type = sys.argv[3]        # 't2m', 'ww', 'tp', 'tp_acc', 'cape_ml', 'dbz_cmax'
+var_type = sys.argv[3]        # 't2m', 'wind', ...
 os.makedirs(output_dir, exist_ok=True)
 
 # ------------------------------
-# Geo-Daten
+# var_type -> Substring, der im Dateinamen der zugehoerigen .om Datei steht
 # ------------------------------
-cities = pd.DataFrame({
-    'name': ['Berlin', 'Hamburg', 'München', 'Köln', 'Frankfurt', 'Dresden', 'Stuttgart', 'Düsseldorf',
-             'Nürnberg', 'Erfurt', 'Leipzig', 'Bremen', 'Saarbrücken', 'Hannover'],
-    'lat': [52.52, 53.55, 48.14, 50.94, 50.11, 51.05, 48.78, 51.23,
-            49.45, 50.98, 51.34, 53.08, 49.24, 52.37],
-    'lon': [13.40, 9.99, 11.57, 6.96, 8.68, 13.73, 9.18, 6.78,
-            11.08, 11.03, 12.37, 8.80, 6.99, 9.73]
-})
-
-eu_cities = pd.DataFrame({
-    'name': [
-        'Berlin', 'Oslo', 'Warschau',
-        'Lissabon', 'Madrid', 'Rom',
-        'Ankara', 'Helsinki', 'Reykjavik',
-        'London', 'Paris'
-    ],
-    'lat': [
-        52.52, 59.91, 52.23,
-        38.72, 40.42, 41.90,
-        39.93, 60.17, 64.13,
-        51.51, 48.85
-    ],
-    'lon': [
-        13.40, 10.75, 21.01,
-        -9.14, -3.70, 12.48,
-        32.86, 24.94, -21.82,
-        -0.13, 2.35
-    ]
-})
-
-ignore_codes = {4}
-
-# ------------------------------
-# WW-Farben
-# ------------------------------
-ww_colors_base = {
-    0: "#676767",
-    7: "#FFA500",
-    1: "#00FF00",
-    12:"#FF4343", 3: "#8B0000",
-    6: "#6495ED", 5: "#0000FF",
-    8: "#FF00FF",
+OM_FILENAME_PATTERNS = {
+    "t2m": "temperature_2m",
+    "wind": "wind_gusts_10m",
+    "tp": "precipitation",
 }
-ww_categories = {
-    "Schneeregen": [7],
-    "Regen": [1],
-    "Eiskörner": [8],
-    "gefr. Regen": [12, 3],
-    "Schnee": [6, 5],
-}
+
+# ------------------------------
+# Fuer welche Variablen die echten Werte zusaetzlich als DVAL-Chunk
+# ins WebP eingebettet werden sollen (kein separates File noetig).
+# ------------------------------
+EMBED_DATA_VARS = {"t2m", "wind"}
 
 # ------------------------------
 # Temperatur-Farben
@@ -86,59 +43,16 @@ t2m_bounds = list(range(-36, 50, 2))
 t2m_colors = LinearSegmentedColormap.from_list(
     "t2m_smoooth",
     [
-    "#F675F4", "#F428E9", "#B117B5", "#950CA2", "#640180",
-    "#3E007F", "#00337E", "#005295", "#1292FF", "#49ACFF",
-    "#8FCDFF", "#B4DBFF", "#B9ECDD", "#88D4AD", "#07A125",
-    "#3FC107", "#9DE004", "#E7F700", "#F3CD0A", "#EE5505",
-    "#C81904", "#AF0E14", "#620001", "#C87879", "#FACACA",
-    "#E1E1E1", "#6D6D6D"
+        "#F675F4", "#F428E9", "#B117B5", "#950CA2", "#640180",
+        "#3E007F", "#00337E", "#005295", "#1292FF", "#49ACFF",
+        "#8FCDFF", "#B4DBFF", "#B9ECDD", "#88D4AD", "#07A125",
+        "#3FC107", "#9DE004", "#E7F700", "#F3CD0A", "#EE5505",
+        "#C81904", "#AF0E14", "#620001", "#C87879", "#FACACA",
+        "#E1E1E1", "#6D6D6D"
     ],
-N=len(t2m_bounds)
+    N=len(t2m_bounds)
 )
 t2m_norm = BoundaryNorm(t2m_bounds, ncolors=len(t2m_bounds))
-
-# ------------------------------
-# Niederschlags-Farben 1h (tp)
-# ------------------------------
-
-# ------------------------------
-# Aufsummierter Niederschlag (tp_acc)
-# ------------------------------
-tp_acc_bounds = [0.1, 1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100,
-                 125, 150, 175, 200, 250, 300, 400, 500]
-tp_acc_colors = ListedColormap([
-    "#B4D7FF","#75BAFF","#349AFF","#0582FF","#0069D2",
-    "#003680","#148F1B","#1ACF06","#64ED07","#FFF32B",
-    "#E9DC01","#F06000","#FF7F26","#FFA66A","#F94E78",
-    "#F71E53","#BE0000","#880000","#64007F","#C201FC",
-    "#DD66FE","#EBA6FF","#F9E7FF","#D4D4D4","#969696"
-])
-tp_acc_norm = mcolors.BoundaryNorm(tp_acc_bounds, tp_acc_colors.N)
-
-# ------------------------------
-# CAPE-Farben
-# ------------------------------
-cape_bounds = [0, 20, 40, 60, 80, 100, 200, 400, 600, 800, 1000, 1500, 2000, 2500, 3000]
-cape_colors = ListedColormap([
-    "#676767", "#006400", "#008000", "#00CC00", "#66FF00", "#FFFF00", 
-    "#FFCC00", "#FF9900", "#FF6600", "#FF3300", "#FF0000", "#FF0095", 
-    "#FC439F", "#FF88D3", "#FF99FF"
-])
-cape_norm = mcolors.BoundaryNorm(cape_bounds, cape_colors.N)
-
-# ------------------------------
-# DBZ-CMAX Farben
-# ------------------------------
-dbz_bounds = [0, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 63, 67, 70]
-dbz_colors = ListedColormap([
-    "#676767", "#FFFFFF", "#B3EFED", "#8CE7E2", "#00F5ED",
-    "#00CEF0", "#01AFF4", "#028DF6", "#014FF7", "#0000F6",
-    "#00FF01", "#01DF00", "#00D000", "#00BF00", "#00A701",
-    "#019700", "#FFFF00", "#F9F000", "#EDD200", "#E7B500",
-    "#FF5000", "#FF2801", "#F40000", "#EA0001", "#CC0000",
-    "#FFC8FF", "#E9A1EA", "#D379D3", "#BE55BE", "#960E96"
-])
-dbz_norm = mcolors.BoundaryNorm(dbz_bounds, dbz_colors.N)
 
 # ------------------------------
 # Windböen-Farben
@@ -153,590 +67,329 @@ wind_colors = ListedColormap([
 ])
 wind_norm = mcolors.BoundaryNorm(wind_bounds, wind_colors.N)
 
-#-------------------------------
-# Schneehöhen-Farben
-#------------------------------
-snow_bounds = [0, 0.1, 0.5, 1, 2, 3, 4, 5, 7, 10, 15, 20, 30, 40, 50, 60, 70, 80, 100, 150, 200, 250, 300, 400]  # in cm
-snow_colors = ListedColormap([
-        "#F8F8F8", "#DCDBFA", "#AAA9C8", "#75BAFF", "#349AFF", "#0582FF",
-        "#0069D2", "#004F9C", "#01327F", "#4B007F", "#64007F", "#9101BB",
-        "#C300FC", "#D235FF", "#EBA6FF", "#F4CEFF", "#FAB2CA", "#FF9798",
-        "#FE6E6E", "#DF093F", "#BE0000", "#A40000", "#880000", "#460000"
-    ])
-snow_norm = mcolors.BoundaryNorm(snow_bounds, snow_colors.N)
-
-#-------------------------------
-#Gesamtbewölkung-Farben
-#------------------------------
-# Farbskala für Gesamtbewölkung
-cloud_bounds = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]  # in cm
-cloud_colors = ListedColormap([
-    "#FFFF00", "#EEEE0B", "#DDDD17", "#CCCC22", "#BBBB2E",
-    "#ABAB39", "#9A9A45", "#898950", "#78785C", "#676767"
+# ------------------------------
+# Niederschlags-Farben 1h (tp)
+# ------------------------------
+prec_bounds = [0.0, 0.1, 0.2, 0.5, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+               12, 14, 16, 20, 24, 30, 40, 50, 60, 80, 100, 125]
+prec_colors = ListedColormap([
+    "#FFFFFF", "#B4D7FF", "#75BAFF", "#349AFF", "#0582FF", "#0069D2",
+    "#003680", "#148F1B", "#1ACF06", "#64ED07", "#FFF32B",
+    "#E9DC01", "#F06000", "#FF7F26", "#FFA66A", "#F94E78",
+    "#F71E53", "#BE0000", "#880000", "#64007F", "#C201FC",
+    "#DD66FE", "#EBA6FF", "#F9E7FF", "#D4D4D4"
 ])
-cloud_norm = mcolors.BoundaryNorm(cloud_bounds, cloud_colors.N)
+prec_norm = mcolors.BoundaryNorm(prec_bounds, prec_colors.N)
+
+COLORMAPS = {
+    "t2m": (t2m_colors, t2m_norm),
+    "wind": (wind_colors, wind_norm),
+    "tp": (prec_colors, prec_norm),
+}
+
+# Umrechnung Rohwert -> Anzeige-Einheit, je Variable
+UNIT_CONVERT = {
+    "t2m": lambda v: v - 273.15 if np.nanmax(v) > 200 else v,  # K -> °C, nur falls noetig
+    "wind": lambda v: v * 3.6,  # m/s -> km/h
+}
+
+# Quantisierungsschritt je Variable fuer den eingebetteten DVAL-Chunk
+# (feiner als die Anzeige-Nachkommastellen, damit kein sichtbarer
+# Genauigkeitsverlust entsteht).
+QUANTUM_STEP = {
+    "t2m": 0.05,   # °C
+    "wind": 0.2,   # km/h
+}
+NAN_SENTINEL_I16 = -32768
+DVAL_FOURCC = b"DVAL"
 
 # ------------------------------
-#Gesamtwassergehalt
+# Globale Bbox der Quelldateien (bestaetigt via crs_wkt-Kind der .om Datei)
 # ------------------------------
-twater_bounds = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90]  # in mm
-twater_colors = ListedColormap([
-        "#6E4A00", "#B49E62", "#D7CD13", "#B9F019", "#1ACF06",
-        "#08534C", "#035DBE", "#2692FF", "#75BAFF", "#CBBFFF",
-        "#EBA6FF", "#DD66FE", "#AC01DD", "#7C009E", "#673775",
-        "#6B6B6B", "#818181", "#969696"
-    ])
+GLOBAL_LAT_MIN, GLOBAL_LON_MIN = -90.0, -180.0
+GLOBAL_LAT_MAX, GLOBAL_LON_MAX = 90.0, 179.75
 
-twater_norm = mcolors.BoundaryNorm(twater_bounds, twater_colors.N)
+# Speicherreihenfolge der Lat-Achse in der Datei (Zeile 0 = Norden oder Sueden?).
+# Per check_lat_order.py verifiziert: Zeile 0 = ~-52°C (Suedpol) -> aufsteigend gespeichert.
+LAT_STORED_DESCENDING = False
 
-# ------------------------------
-# Schneefallgrenze (SNOWLMT)
-# ------------------------------
-
-snowfall_bounds = [0, 100, 250, 500, 750, 1000, 1500, 2000, 2500, 3000, 4000, 5000, 6000]
-snowfall_colors = ListedColormap([
-    "#FF00A6", "#D900FF", "#8C00FF", "#0008FF", "#0099FF",
-    "#00F2FF", "#1AFF00", "#FFFB00", "#FFBF00", "#FFA600",
-    "#FF6F00", "#930000", 
-])
-
-snowfall_norm = mcolors.BoundaryNorm(snowfall_bounds, snowfall_colors.N)
+# Dimensionsreihenfolge im om-Array. Bestaetigt: shape=(721,1440,85), Zeit
+# ist die LETZTE Dimension (siehe auch 'coordinates'-Kind: "lat lon time").
+DIM_ORDER = ("lat", "lon", "time")
 
 # ------------------------------
-# Luftdruck
+# Bounding Box (wie im GRIB2-Skript)
 # ------------------------------
+extent = [-3.94, 20.34, 43.18, 58.08]  # lon_min, lon_max, lat_min, lat_max
 
-# Luftdruck-Farben (kontinuierlicher Farbverlauf für 45 Bins)
-pmsl_bounds_colors = list(range(912, 1070, 4))  # Alle 4 hPa (45 Bins)
-pmsl_colors = LinearSegmentedColormap.from_list(
-    "pmsl_smooth",
-    [
-       "#FF6DFF", "#C418C4", "#950CA2", "#5A007D", "#3D007F",
-       "#00337E", "#0472CB", "#4FABF8", "#A3D4FF", "#79DAAD",
-       "#07A220", "#3EC008", "#9EE002", "#F3FC01", "#F19806",
-       "#F74F11", "#B81212", "#8C3234", "#C87879", "#F9CBCD",
-       "#E2E2E2"
-
-    ],
-    N=len(pmsl_bounds_colors)  # Genau 45 Farben für 45 Bins
-)
-pmsl_norm = BoundaryNorm(pmsl_bounds_colors, ncolors=len(pmsl_bounds_colors))
+# Bounding Box fuer den eingebetteten DVAL-Chunk (nur t2m/wind) - hier
+# reicht Deutschland + etwas Rand fuer Grenzregionen beim Hovern; das
+# Farbbild selbst bleibt unveraendert auf der vollen Domaene.
+GERMANY_BBOX_LONLAT = [5.5, 15.3, 47.0, 55.3]  # lon_min, lon_max, lat_min, lat_max
 
 # ------------------------------
-# Geopotenzial
+# EPSG:4326 -> EPSG:3857 (Web Mercator)
 # ------------------------------
+EARTH_RADIUS = 6378137.0
+WEBMERCATOR_WIDTH = 1024
 
-geo_bounds = list(range(4800, 6000, 40))
-geo_colors = LinearSegmentedColormap.from_list(
-    "geo_smooth",
-    [
-        "#530155", "#6F1171", "#871D89", "#9E2C9E", "#B73AB2", "#CB49CD", "#9D3AD2",
-        "#6C2ECF", "#3B20C5", "#0B12B8", "#0D2FC4", "#124FC4", "#136AB7", "#1889C1",
-        "#149A99", "#06B16F", "#10BA4D", "#09CC28", "#FECC0B", "#FEB906", "#F5A40A",
-        "#F09006", "#E38500", "#EB6C01", "#E45C04", "#DC4A01", "#DB3600", "#D42601",
-        "#C31700", "#CB0003", "#4E0703"
-    ],
-    N=len(geo_bounds)
-)
-geo_norm = BoundaryNorm(geo_bounds, ncolors=len(geo_bounds))
 
+def lonlat_to_webmercator(lon_deg, lat_deg):
+    x = EARTH_RADIUS * np.radians(lon_deg)
+    y = EARTH_RADIUS * np.log(np.tan(np.pi / 4 + np.radians(lat_deg) / 2))
+    return x, y
+
+
+def webmercator_target_grid(extent, out_width=WEBMERCATOR_WIDTH):
+    lon_min, lon_max, lat_min, lat_max = extent
+    x_min, y_min = lonlat_to_webmercator(lon_min, lat_min)
+    x_max, y_max = lonlat_to_webmercator(lon_max, lat_max)
+    aspect = (y_max - y_min) / (x_max - x_min)
+    out_height = max(int(round(out_width * aspect)), 1)
+    x_new = np.linspace(x_min, x_max, out_width)
+    y_new = np.linspace(y_min, y_max, out_height)  # aufsteigend: Süd -> Nord
+    return x_new, y_new
+
+
+def warp_equirect_to_webmercator(data, lon, lat, extent, method="linear", out_width=WEBMERCATOR_WIDTH):
+    """data/lon/lat: reguläres lat/lon-Gitter, lat und lon aufsteigend sortiert
+    (Zeile 0 = Süden)."""
+    x_new, y_new = webmercator_target_grid(extent, out_width=out_width)
+    xx, yy = np.meshgrid(x_new, y_new)
+    lon_grid = np.degrees(xx / EARTH_RADIUS)
+    lat_grid = np.degrees(2 * np.arctan(np.exp(yy / EARTH_RADIUS)) - np.pi / 2)
+
+    interp_func = RegularGridInterpolator(
+        (lat, lon), data, method=method, bounds_error=False, fill_value=np.nan
+    )
+    pts = np.array([lat_grid.ravel(), lon_grid.ravel()]).T
+    return interp_func(pts).reshape(lat_grid.shape)
+
+
+# Gleiches Ziel-Pixelraster wie in warp_equirect_to_webmercator (muss mit
+# WEBMERCATOR_WIDTH uebereinstimmen, damit die Indizes exakt passen) -
+# einmalig ausserhalb der Schleife berechnet, da pro Lauf identisch.
+_full_x_new, _full_y_new = webmercator_target_grid(extent, out_width=WEBMERCATOR_WIDTH)
+
+_gbx_min, _gby_min = lonlat_to_webmercator(GERMANY_BBOX_LONLAT[0], GERMANY_BBOX_LONLAT[2])
+_gbx_max, _gby_max = lonlat_to_webmercator(GERMANY_BBOX_LONLAT[1], GERMANY_BBOX_LONLAT[3])
+
+# Indizes im vollen Raster, die die Bbox gerade so umschliessen (lieber
+# ein Pixel zu viel als zu wenig - daher aussen aufrunden statt clippen).
+_col_i0 = max(0, np.searchsorted(_full_x_new, _gbx_min, side="left") - 1)
+_col_i1 = min(len(_full_x_new) - 1, np.searchsorted(_full_x_new, _gbx_max, side="right"))
+_row_i0 = max(0, np.searchsorted(_full_y_new, _gby_min, side="left") - 1)
+_row_i1 = min(len(_full_y_new) - 1, np.searchsorted(_full_y_new, _gby_max, side="right"))
+
+# Exakte Mercator-Extent des zugeschnittenen Rasters (= tatsaechliche
+# Gitterpunkte an den Raendern, nicht die rohe Bbox - damit die
+# Ruecktransformation im Frontend pixelgenau bleibt).
+GERMANY_CROP_EXTENT_3857 = [
+    float(_full_x_new[_col_i0]), float(_full_y_new[_row_i0]),
+    float(_full_x_new[_col_i1]), float(_full_y_new[_row_i1]),
+]
+
+
+def crop_to_germany(data_south_first):
+    """data_south_first: 2D-Array wie von warp_equirect_to_webmercator
+    zurückgegeben (row0 = Süden, aufsteigend in Mercator-Y wie
+    _full_y_new). Schneidet auf die Deutschland-Bbox zu."""
+    return data_south_first[_row_i0:_row_i1 + 1, _col_i0:_col_i1 + 1]
+
+
+def data_to_rgba(data, cmap, norm):
+    rgba = cmap(norm(data))
+    rgba = (rgba * 255).astype(np.uint8)
+    rgba[~np.isfinite(data), 3] = 0
+    return rgba
+
+
+def save_transparent_webp(data, cmap, norm, out_path):
+    rgba = data_to_rgba(data, cmap, norm)
+    img = Image.fromarray(rgba[::-1, :, :], mode="RGBA")  # Zeile 0 -> oben = Norden
+    img.save(out_path, format="WEBP", lossless=True, method=4)
+
+
+def embed_data_chunk(webp_path, data, extent_3857, quantum, fourcc=DVAL_FOURCC):
+    """Hängt ein rohes Datenfeld als privaten, int16-quantisierten RIFF-Chunk
+    an ein WebP an.
+
+    data: 2D-Array (float), row0 = Norden (also bereits wie fürs Bild
+          gespiegelt).
+    extent_3857: [x_min, y_min, x_max, y_max] in Web-Mercator-Metern -
+                 exakt das Raster, auf dem `data` liegt.
+    quantum: Rasterschritt in den Originaleinheiten (z.B. 0.05 für °C).
+    """
+    height, width = data.shape
+
+    nan_mask = ~np.isfinite(data)
+    data_filled = np.where(nan_mask, 0.0, data)  # verhindert NaN->int Warnung beim Runden/Casten
+    quant = np.round(data_filled / quantum)
+    # Sicherheitsclip: verhindert einen int16-Überlauf bei extremen
+    # Ausreißern, ohne das eigentlich zulässige Wertespektrum
+    # (t2m/wind liegen weit darunter) einzuschränken.
+    quant = np.clip(quant, -32767, 32767).astype(np.int16)
+    quant[nan_mask] = NAN_SENTINEL_I16
+
+    header = struct.pack("<BBII", 2, 1, width, height)
+    header += struct.pack("<4d", *extent_3857)
+    header += struct.pack("<d", quantum)
+    compressed = zlib.compress(np.ascontiguousarray(quant, dtype="<i2").tobytes(), level=9)
+    payload = header + compressed
+
+    size = len(payload)
+    chunk = fourcc + struct.pack("<I", size) + payload
+    if size % 2 == 1:
+        chunk += b"\x00"  # RIFF-Padding auf gerade Länge, zählt nicht zu size
+
+    with open(webp_path, "rb") as f:
+        content = f.read()
+
+    if content[0:4] != b"RIFF" or content[8:12] != b"WEBP":
+        raise ValueError(f"{webp_path} ist keine gültige WebP-Datei (RIFF/WEBP-Header fehlt)")
+
+    riff_size = struct.unpack("<I", content[4:8])[0]
+    new_riff_size = riff_size + len(chunk)
+
+    with open(webp_path, "wb") as f:
+        f.write(content[:4])
+        f.write(struct.pack("<I", new_riff_size))
+        f.write(content[8:])
+        f.write(chunk)
+
+
+def compute_crop_indices(nlat, nlon):
+    lat_res = (GLOBAL_LAT_MAX - GLOBAL_LAT_MIN) / (nlat - 1)
+    lon_res = (GLOBAL_LON_MAX - GLOBAL_LON_MIN) / (nlon - 1)
+
+    lon_min, lon_max, lat_min, lat_max = extent
+
+    if LAT_STORED_DESCENDING:
+        row_of = lambda v: (GLOBAL_LAT_MAX - v) / lat_res  # Zeile 0 = Norden
+    else:
+        row_of = lambda v: (v - GLOBAL_LAT_MIN) / lat_res  # Zeile 0 = Sueden
+
+    r1, r2 = sorted([row_of(lat_min), row_of(lat_max)])
+    row_start = max(0, int(np.floor(r1)) - 1)
+    row_end = min(nlat - 1, int(np.ceil(r2)) + 1)
+
+    col_of = lambda v: (v - GLOBAL_LON_MIN) / lon_res
+    col_start = max(0, int(np.floor(col_of(lon_min))) - 1)
+    col_end = min(nlon - 1, int(np.ceil(col_of(lon_max))) + 1)
+
+    return row_start, row_end, col_start, col_end, lat_res, lon_res
+
+
+def crop_lat_lon_arrays(row_start, row_end, col_start, col_end, lat_res, lon_res, nlat):
+    if LAT_STORED_DESCENDING:
+        lat_full = GLOBAL_LAT_MAX - np.arange(nlat) * lat_res
+    else:
+        lat_full = GLOBAL_LAT_MIN + np.arange(nlat) * lat_res
+    lat_crop = lat_full[row_start:row_end + 1]
+    lon_crop = GLOBAL_LON_MIN + np.arange(col_start, col_end + 1) * lon_res
+    return lat_crop, lon_crop
+
+
+def load_valid_times(root, ntime, om_path):
+    """Liest die echten (nicht-gleichmaessigen) Zeitschritte direkt aus dem
+    'time'-Kind der om-Datei (Unix-Timestamps in Sekunden, UTC)."""
+    try:
+        time_child = root.get_child_by_name("time")
+    except Exception as e:
+        raise ValueError(
+            f"{om_path}: kein 'time'-Kind gefunden - kann Zeitstempel nicht bestimmen ({e})"
+        )
+
+    if not time_child.is_array or time_child.shape[0] != ntime:
+        raise ValueError(
+            f"{om_path}: 'time'-Kind passt nicht (shape={time_child.shape}, erwartet ntime={ntime})"
+        )
+
+    raw = time_child.read_array((slice(0, ntime),))
+    return [dt.datetime.fromtimestamp(int(t), tz=dt.timezone.utc) for t in raw]
 
 
 # ------------------------------
-# Kartenparameter
+# Farb-/Konvertierungs-Auswahl fuer den angeforderten var_type
 # ------------------------------
-FIG_W_PX, FIG_H_PX = 880, 830
-BOTTOM_AREA_PX = 179
-TOP_AREA_PX = FIG_H_PX - BOTTOM_AREA_PX
-TARGET_ASPECT = FIG_W_PX / TOP_AREA_PX
+if var_type not in COLORMAPS:
+    print(f"Unbekannter var_type {var_type}")
+    sys.exit(1)
 
-# Bounding Box Deutschland (fix, keine GeoJSON nötig)
-extent = [5, 16, 47, 56]
+cmap, norm = COLORMAPS[var_type]
+convert = UNIT_CONVERT.get(var_type, lambda v: v)
 
-extent_eu = [-23.5, 45.0, 29.5, 68.4]
-
-# ------------------------------
-# WW-Legende Funktion
-# ------------------------------
-def add_ww_legend_bottom(fig, ww_categories, ww_colors_base):
-    legend_height = 0.12
-    legend_ax = fig.add_axes([0.05, 0.01, 0.9, legend_height])
-    legend_ax.axis("off")
-    for i, (label, codes) in enumerate(ww_categories.items()):
-        n_colors = len(codes)
-        block_width = 1.0 / len(ww_categories)
-        gap = 0.05 * block_width
-        x0 = i * block_width
-        x1 = (i + 1) * block_width
-        inner_width = x1 - x0 - gap
-        color_width = inner_width / n_colors
-        for j, c in enumerate(codes):
-            color = ww_colors_base.get(c, "#FFFFFF")
-            legend_ax.add_patch(mpatches.Rectangle((x0 + j * color_width, 0.3),
-                                                  color_width, 0.6,
-                                                  facecolor=color, edgecolor='black'))
-        legend_ax.text((x0 + x1)/2, 0.05, label, ha='center', va='bottom', fontsize=10)
+pattern = OM_FILENAME_PATTERNS.get(var_type)
+if pattern is None:
+    print(f"var_type '{var_type}' hat noch kein Dateinamen-Muster in OM_FILENAME_PATTERNS")
+    sys.exit(1)
 
 # ------------------------------
 # Dateien durchgehen
 # ------------------------------
-for filename in sorted(os.listdir(data_dir)):
-    if not filename.endswith(".grib2"):
-        continue
-    path = os.path.join(data_dir, filename)
-    ds = cfgrib.open_dataset(path)
+all_files_global = sorted(f for f in os.listdir(data_dir) if f.endswith(".om"))
+matching_files = [f for f in all_files_global if pattern.lower() in f.lower()]
 
-    # Daten je Typ
-    if var_type == "t2m":
-        if "t2m" not in ds:
-            print(f"Keine t2m in {filename}")
-            continue
-        data = ds["t2m"].values - 273.15
-    elif var_type == "t2m_eu":
-        if "t2m" not in ds:
-            print(f"Keine t2m in {filename}")
-            continue
-        data = ds["t2m"].values - 273.15
-    elif var_type == "ww":
-        varname = next((vn for vn in ds.data_vars if vn.lower() in ["ptype","weather"]), None)
-        if varname is None:
-            print(f"Keine WW in {filename}")
-            continue
-        data = ds[varname].values
-    elif var_type == "ww_eu":
-        varname = next((vn for vn in ds.data_vars if vn.lower() in ["ptype","weather"]), None)
-        if varname is None:
-            print(f"Keine WW in {filename}")
-            continue
-        data = ds[varname].values
-    elif var_type == "tp_acc":
-        if "tp" not in ds:
-            print(f"Keine tp in {filename}")
-            continue
-        data = ds["tp"].values * 1000
-        data[data < 0] = 0
-        cmap, norm = tp_acc_colors, tp_acc_norm
-        cmap.set_under("white")
-    elif var_type == "dbz_cmax":
-        if "DBZ_CMAX" not in ds:
-            print(f"Keine DBZ_CMAX in {filename} ds.keys(): {list(ds.keys())}")
-            continue
-        data = ds["DBZ_CMAX"].values[0,:,:]
-    elif var_type == "wind":
-        if "fg10" not in ds:
-            print(f"Keine passende Windvariable in {filename} ds.keys(): {list(ds.keys())}")
-            continue
-        data = ds["fg10"].values
-        data[data < 0] = np.nan
-        data = data * 3.6  # m/s → km/h
-    elif var_type == "wind_eu":
-        if "fg10" not in ds:
-            print(f"Keine passende Windvariable in {filename} ds.keys(): {list(ds.keys())}")
-            continue
-        data = ds["fg10"].values
-        data[data < 0] = np.nan
-        data = data * 3.6
-    elif var_type == "pmsl":
-        if "msl" not in ds:
-            print(f"Keine prmsl-Variable in {filename} ds.keys(): {list(ds.keys())}")
-            continue
-        data = ds["msl"].values / 100
-        data[data < 0] = np.nan
-    elif var_type == "pmsl_eu":
-        if "msl" not in ds:
-            print(f"Keine msl-Variable in {filename} ds.keys(): {list(ds.keys())}")
-            continue
-        data = ds["msl"].values / 100
-        data[data < 0] = np.nan
-    elif var_type == "geo_eu":
-        if "gh" not in ds:
-            print(f"Keine geopot-Variable in {filename} ds.keys(): {list(ds.keys())}")
-            continue
-        data = ds["gh"].values
-        data[data < 0] = np.nan
-    elif var_type == "snow":
-        if "sd" not in ds:
-            print(f"Keine Schneehöhe in {filename}")
-            continue
-        data = ds["sd"].values * 100  # m → cm
-    else:
-        print(f"Unbekannter var_type {var_type}")
-        continue
+if not matching_files:
+    print(f"Keine .om Datei in {data_dir} gefunden, die zu '{pattern}' passt "
+          f"(gefunden: {all_files_global})")
 
-    if data.ndim==3:
-        data=data[0]
+for filename in matching_files:
+    om_path = os.path.join(data_dir, filename)
 
-    lon = ds["longitude"].values
-    lat = ds["latitude"].values
-    run_time_utc = pd.to_datetime(ds["time"].values) if "time" in ds else None
+    with OmFileReader(om_path) as root:
+        # root ist gleichzeitig das Datenarray UND hat Metadaten-Kinder
+        # (time, crs_wkt, unit, forecast_reference_time, coordinates, created_at).
+        if not root.is_array:
+            print(f"{om_path}: root ist kein Array (is_group={root.is_group}) - überspringe")
+            continue
 
-    if "valid_time" in ds:
-        valid_time_raw = ds["valid_time"].values
-        valid_time_utc = pd.to_datetime(valid_time_raw[0]) if np.ndim(valid_time_raw) > 0 else pd.to_datetime(valid_time_raw)
-    else:
-        step = pd.to_timedelta(ds["step"].values[0])
-        valid_time_utc = run_time_utc + step
-    valid_time_local = valid_time_utc.tz_localize("UTC").astimezone(ZoneInfo("Europe/Berlin"))
+        nlat, nlon, ntime = root.shape  # bestaetigt: (lat, lon, time)
 
-    # --------------------------
-    # Figure (Deutschland oder Europa)
-    # --------------------------
-    if var_type in ["pmsl_eu", "geo_eu", "t2m_eu", "ww_eu", "wind_eu"]:
-        scale = 0.9
-        fig = plt.figure(figsize=(FIG_W_PX/100*scale, FIG_H_PX/100*scale), dpi=100)
-        shift_up = 0.02
-        ax = fig.add_axes([0.0, BOTTOM_AREA_PX / FIG_H_PX + shift_up, 1.0, TOP_AREA_PX / FIG_H_PX],
-                        projection=ccrs.PlateCarree())
-        ax.set_extent(extent_eu)
-        ax.set_axis_off()
-        ax.set_aspect('auto')
-    else:
-        scale = 0.9
-        fig = plt.figure(figsize=(FIG_W_PX/100*scale, FIG_H_PX/100*scale), dpi=100)
-        shift_up = 0.02
-        ax = fig.add_axes([0.0, BOTTOM_AREA_PX / FIG_H_PX + shift_up, 1.0, TOP_AREA_PX / FIG_H_PX],
-                        projection=ccrs.PlateCarree())
-        ax.set_extent(extent)
-        ax.set_axis_off()
-        ax.set_aspect('auto')
+        row_start, row_end, col_start, col_end, lat_res, lon_res = compute_crop_indices(nlat, nlon)
+        lat_crop, lon_crop = crop_lat_lon_arrays(row_start, row_end, col_start, col_end, lat_res, lon_res, nlat)
 
+        # Ganzen Europa-Ausschnitt fuer ALLE Zeitschritte auf einmal lesen -
+        # passt zum Chunk-Layout (Zeitachse wird ohnehin komplett pro Chunk
+        # gespeichert), spart also viele einzelne read_array-Aufrufe.
+        data_all = root.read_array((
+            slice(row_start, row_end + 1),
+            slice(col_start, col_end + 1),
+            slice(0, ntime),
+        ))  # shape: (nrows, ncols, ntime)
 
-    if var_type in ["pmsl_eu", "geo_eu", "t2m_eu", "ww_eu", "wind_eu"]:
-        target_res = 0.10   # gröber für Europa (~11 km)
-        lon_min, lon_max, lat_min, lat_max = extent_eu
-        buffer = target_res * 20
-        nx = int(round(lon_max - lon_min) / target_res) + 1
-        ny = int(round(lat_max - lat_min) / target_res) + 1
-        lon_new = np.linspace(lon_min - buffer, lon_max + buffer, nx + 15)
-        lat_new = np.linspace(lat_min - buffer, lat_max + buffer, ny + 15)
-        lon2d_new, lat2d_new = np.meshgrid(lon_new, lat_new)
-    else:
-        target_res = 0.025  # feiner für Deutschland (~2.8 km)
-        lon_min, lon_max, lat_min, lat_max = extent
-        lon_new = np.arange(lon_min, lon_max + target_res, target_res)
-        lat_new = np.arange(lat_min, lat_max + target_res, target_res)
-        lon2d_new, lat2d_new = np.meshgrid(lon_new, lat_new)
+        valid_times_utc = load_valid_times(root, ntime, om_path)
 
+        for t_idx in range(ntime):
+            data = convert(np.asarray(data_all[:, :, t_idx], dtype=np.float64))
 
-    # Nur interpolieren, wenn Daten reguläres 2D-Gitter haben
-    if lon.ndim == 1 and lat.ndim == 1 and data.ndim == 2:
-        try:
-            if var_type in ["ww", "ww_eu"]:
-                # 🧱 Kategorische Interpolation: nearest-neighbor
-                interp_func = RegularGridInterpolator(
-                    (lat[::-1], lon),
-                    data[::-1, :],
-                    method="nearest",          # <--- WICHTIG
-                    bounds_error=False,
-                    fill_value=np.nan
-                )
+            if LAT_STORED_DESCENDING:
+                data = data[::-1, :]  # Zeile 0 -> Sueden, wie warp_equirect erwartet
+                lat_asc = lat_crop[::-1]
             else:
-                # 🌈 Kontinuierliche Interpolation: linear
-                interp_func = RegularGridInterpolator(
-                    (lat[::-1], lon),
-                    data[::-1, :],
-                    method="linear",
-                    bounds_error=False,
-                    fill_value=np.nan
-                )
+                lat_asc = lat_crop
 
-            pts = np.array([lat2d_new.ravel(), lon2d_new.ravel()]).T
-            data = interp_func(pts).reshape(lat2d_new.shape)
-            lon, lat = lon_new, lat_new
-            lon2d, lat2d = lon2d_new, lat2d_new
-        except Exception as e:
-            print(f"Interpolation übersprungen ({e})")
+            # ------------------------------
+            # Nach EPSG:3857 (Web Mercator) umprojizieren
+            # ------------------------------
+            render_data_merc = warp_equirect_to_webmercator(data, lon_crop, lat_asc, extent, method="linear")
 
-    # Plot
-    if var_type == "t2m":
-        im = ax.pcolormesh(lon, lat, data, cmap=t2m_colors, norm=t2m_norm, shading="auto")
-    
-    elif var_type == "t2m_eu":
-        im = ax.pcolormesh(lon, lat, data, cmap=t2m_colors, norm=t2m_norm, shading="auto")
-        
-    elif var_type == "ww":
-        valid_mask = np.isfinite(data)
-        codes = np.unique(data[valid_mask]).astype(int)
-        codes = [c for c in codes if c in ww_colors_base and c not in ignore_codes]
-        codes.sort()
-        cmap = ListedColormap([ww_colors_base[c] for c in codes])
-        code2idx = {c: i for i, c in enumerate(codes)}
-        idx_data = np.full_like(data, fill_value=np.nan, dtype=float)
-        for c,i in code2idx.items():
-            idx_data[data==c]=i
-        im = ax.pcolormesh(lon, lat, idx_data, cmap=cmap, vmin=-0.5, vmax=len(codes)-0.5, shading="auto")
-    elif var_type == "ww_eu":
-        valid_mask = np.isfinite(data)
-        codes = np.unique(data[valid_mask]).astype(int)
-        codes = [c for c in codes if c in ww_colors_base and c not in ignore_codes]
-        codes.sort()
-        cmap = ListedColormap([ww_colors_base[c] for c in codes])
-        code2idx = {c: i for i, c in enumerate(codes)}
-        idx_data = np.full_like(data, fill_value=np.nan, dtype=float)
-        for c,i in code2idx.items():
-            idx_data[data==c]=i
-        im = ax.pcolormesh(lon, lat, idx_data, cmap=cmap, vmin=-0.5, vmax=len(codes)-0.5, shading="auto")
-    elif var_type == "tp_acc":
-        im = ax.pcolormesh(lon2d, lat2d, data, cmap=tp_acc_colors, norm=tp_acc_norm, shading="auto")
-    elif var_type == "snow":
-        im = ax.pcolormesh(lon, lat, data, cmap=snow_colors, norm=snow_norm, shading="auto")
-    elif var_type == "wind":
-        im = ax.pcolormesh(lon, lat, data, cmap=wind_colors, norm=wind_norm, shading="auto")
-    elif var_type == "wind_eu":
-        im = ax.pcolormesh(lon, lat, data, cmap=wind_colors, norm=wind_norm, shading="auto")
-    elif var_type == "pmsl":
-        # --- Luftdruck auf Meereshöhe (Deutschland) ---
-        im = ax.pcolormesh(lon, lat, data, cmap=pmsl_colors, norm=pmsl_norm, shading="auto")
-        data_hpa = data  # Daten liegen bereits in hPa vor
+            # ------------------------------
+            # Transparentes WebP speichern
+            # ------------------------------
+            outname = f"{var_type}_{valid_times_utc[t_idx]:%Y%m%d_%H%M}.webp"
+            out_path = os.path.join(output_dir, outname)
+            save_transparent_webp(render_data_merc, cmap, norm, out_path)
 
-        # Haupt-Isobaren (alle 4 hPa)
-        main_levels = list(range(912, 1070, 4))
-        # Feine Isobaren (alle 1 hPa)
-        fine_levels = list(range(912, 1070, 1))
+            # Fuer t2m/wind zusaetzlich die echten physikalischen Werte
+            # (°C bzw. km/h, nicht die Farben) als privaten RIFF-Chunk
+            # direkt ins WebP einbetten - row0 = Norden, damit der Chunk
+            # 1:1 zur Bildorientierung passt (das Bild wird in
+            # save_transparent_webp beim Speichern gespiegelt,
+            # render_data_merc selbst hat row0 = Sueden).
+            if var_type in EMBED_DATA_VARS:
+                germany_data = crop_to_germany(render_data_merc)          # row0 = Süden
+                quantum = QUANTUM_STEP.get(var_type, 0.1)
+                embed_data_chunk(out_path, germany_data[::-1], GERMANY_CROP_EXTENT_3857, quantum)  # row0 = Norden
 
-        # Nur Levels zeichnen, die im Datenbereich liegen
-        main_levels = [lev for lev in main_levels if data_hpa.min() <= lev <= data_hpa.max()]
-        fine_levels = [lev for lev in fine_levels if data_hpa.min() <= lev <= data_hpa.max()]
-
-        # Feine Isobaren (weiß, dünn, leicht transparent)
-        ax.contour(
-            lon, lat, data_hpa,
-            levels=fine_levels,
-            colors='gray', linewidths=0.5, alpha=0.4
-        )
-
-        # Haupt-Isobaren (weiß, etwas dicker)
-        cs_main = ax.contour(
-            lon, lat, data_hpa,
-            levels=main_levels,
-            colors='white', linewidths=0.8, alpha=0.9
-        )
-
-        # Isobaren-Beschriftung (Zahlen direkt auf Linien)
-        ax.clabel(cs_main, inline=True, fmt='%d', fontsize=9, colors='black')
-
-        # --- Extremwerte (Tief & Hoch) markieren, aber nur wenn im Extent ---
-        min_idx = np.unravel_index(np.nanargmin(data_hpa), data_hpa.shape)
-        max_idx = np.unravel_index(np.nanargmax(data_hpa), data_hpa.shape)
-        min_val = data_hpa[min_idx]
-        max_val = data_hpa[max_idx]
-
-        lon_min, lon_max, lat_min, lat_max = extent
-
-        # Tiefdruckzentrum (blauer Wert)
-        lon_minpt, lat_minpt = lon[min_idx[1]], lat[min_idx[0]]
-        if lon_min <= lon_minpt <= lon_max and lat_min <= lat_minpt <= lat_max:
-            ax.text(
-                lon_minpt, lat_minpt,
-                f"{min_val:.0f}",
-                color='white', fontsize=11, fontweight='bold',
-                ha='center', va='center',
-                transform=ccrs.PlateCarree(),
-                clip_on=True,
-                path_effects=[path_effects.withStroke(linewidth=1.5, foreground='black')]
-            )
-
-        # Hochdruckzentrum (roter Wert)
-        lon_maxpt, lat_maxpt = lon[max_idx[1]], lat[max_idx[0]]
-        if lon_min <= lon_maxpt <= lon_max and lat_min <= lat_maxpt <= lat_max:
-            ax.text(
-                lon_maxpt, lat_maxpt,
-                f"{max_val:.0f}",
-                color='white', fontsize=11, fontweight='bold',
-                ha='center', va='center',
-                transform=ccrs.PlateCarree(),
-                clip_on=True,
-                path_effects=[path_effects.withStroke(linewidth=1.5, foreground='black')]
-            )
-
-
-
-    elif var_type == "pmsl_eu":
-            # Schnellere Variante ohne adjust_text und smoothing
-            im = ax.pcolormesh(lon, lat, data, cmap=pmsl_colors, norm=pmsl_norm, shading="auto")
-            data_hpa = data  # data schon in hPa
-            main_levels = list(range(912, 1070, 4))
-            cs = ax.contour(lon, lat, data_hpa, levels=main_levels,
-                            colors='white', linewidths=0.8, alpha=0.9)
-            ax.clabel(cs, inline=True, fmt='%d', fontsize=9, colors='black')
-
-            low_levels = list(range(912, 1070, 1))
-            cs2 = ax.contour(lon, lat, data_hpa, levels=low_levels,
-                             colors='gray', linewidths=0.5, alpha=0.4)
-
-            # Min/Max-Druck markieren (optional)
-            min_idx = np.unravel_index(np.nanargmin(data_hpa), data_hpa.shape)
-            max_idx = np.unravel_index(np.nanargmax(data_hpa), data_hpa.shape)
-
-            ax.text(
-                lon[min_idx[1]], lat[min_idx[0]],
-                f"{data_hpa[min_idx]:.0f}",
-                color='white', fontsize=11, fontweight='bold',
-                ha='center', va='center',
-                transform=ccrs.PlateCarree(),
-                clip_on=True,
-                path_effects=[path_effects.withStroke(linewidth=1.5, foreground='black')]
-            )
-
-            ax.text(
-                lon[max_idx[1]], lat[max_idx[0]],
-                f"{data_hpa[max_idx]:.0f}",
-                color='white', fontsize=11, fontweight='bold',
-                ha='center', va='center',
-                transform=ccrs.PlateCarree(),
-                clip_on=True,
-                path_effects=[path_effects.withStroke(linewidth=1.5, foreground='black')]
-            )
-
-    elif var_type == "geo_eu":
-            im = ax.pcolormesh(lon, lat, data, cmap=geo_colors, norm=geo_norm, shading="auto")
-            data_geo = data  # in m # data schon in hPa
-            main_levels = list(range(4800, 6000, 40))
-            cs = ax.contour(lon, lat, data_geo, levels=main_levels,
-                            colors='white', linewidths=0.8, alpha=0.9)
-            ax.clabel(cs, inline=True, fmt='%d', fontsize=9, colors='black')
-
-            low_levels = list(range(4800, 6000, 10))
-            ax.contour(lon, lat, data_geo, levels=low_levels,
-                            colors='gray', linewidths=0.5, alpha=0.4)
-
-            # Min/Max-Druck markieren (optional)
-            min_idx = np.unravel_index(np.nanargmin(data_geo), data_geo.shape)
-            max_idx = np.unravel_index(np.nanargmax(data_geo), data_geo.shape)
-
-            ax.text(
-                lon[min_idx[1]], lat[min_idx[0]],
-                f"{data_geo[min_idx]:.0f}",
-                color='white', fontsize=11, fontweight='bold',
-                ha='center', va='center',
-                transform=ccrs.PlateCarree(),
-                clip_on=True,
-                path_effects=[path_effects.withStroke(linewidth=1.5, foreground='black')]
-            )
-
-            ax.text(
-                lon[max_idx[1]], lat[max_idx[0]],
-                f"{data_geo[max_idx]:.0f}",
-                color='white', fontsize=11, fontweight='bold',
-                ha='center', va='center',
-                transform=ccrs.PlateCarree(),
-                clip_on=True,
-                path_effects=[path_effects.withStroke(linewidth=2, foreground='black')]
-            )
-    
-
-    # ------------------------------
-    # Grenzen & Städte
-    # ------------------------------
-
-    if var_type in ["pmsl_eu", "geo_eu", "t2m_eu", "ww_eu", "wind_eu"]:
-        # 🌍 Europa: nur Ländergrenzen + europäische Städte
-        ax.add_feature(cfeature.BORDERS.with_scale("10m"), edgecolor="black", linewidth=0.7)
-        ax.add_feature(cfeature.COASTLINE.with_scale("10m"), edgecolor="black", linewidth=0.7)
-
-        for _, city in eu_cities.iterrows():
-            ax.plot(city["lon"], city["lat"], "o", markersize=6,
-                    markerfacecolor="black", markeredgecolor="white",
-                    markeredgewidth=1.5, zorder=5)
-            txt = ax.text(city["lon"] + 0.3, city["lat"] + 0.3, city["name"],
-                          fontsize=9, color="black", weight="bold", zorder=6)
-            txt.set_path_effects([path_effects.withStroke(linewidth=1.5, foreground="white")])
-
-    else:
-        # 🇩🇪 Deutschland: Bundesländer, Grenzen und Städte
-        ax.add_feature(cfeature.STATES.with_scale("10m"), edgecolor="#2C2C2C", linewidth=1)
-        ax.add_feature(cfeature.BORDERS, linestyle=":", edgecolor="#2C2C2C", linewidth=1)
-        ax.add_feature(cfeature.COASTLINE, linewidth=1.0, edgecolor="black")
-
-        for _, city in cities.iterrows():
-            ax.plot(city["lon"], city["lat"], "o", markersize=6,
-                    markerfacecolor="black", markeredgecolor="white",
-                    markeredgewidth=1.5, zorder=5)
-            txt = ax.text(city["lon"] + 0.1, city["lat"] + 0.1, city["name"],
-                          fontsize=9, color="black", weight="bold", zorder=6)
-            txt.set_path_effects([path_effects.withStroke(linewidth=1.5, foreground="white")])
-
-    # Rahmen um Karte
-    ax.add_patch(mpatches.Rectangle((0, 0), 1, 1, transform=ax.transAxes,
-                                    fill=False, color="black", linewidth=2))
-
-
-    # Legende
-    legend_h_px = 50
-    legend_bottom_px = 45
-    if var_type in ["t2m","tp_acc","cape_ml","dbz_cmax","wind", "wind_eu","cloud", "pmsl", "pmsl_eu", "geo_eu", "t2m_eu", "snow"]:
-        bounds = t2m_bounds if var_type=="t2m" else tp_acc_bounds if var_type=="tp_acc" else wind_bounds if var_type=="wind"else wind_bounds if var_type=="wind_eu" else pmsl_bounds_colors if var_type=="pmsl" else pmsl_bounds_colors if var_type=="pmsl_eu" else geo_bounds if var_type=="geo_eu" else t2m_bounds if var_type=="t2m_eu" else snow_bounds
-        cbar_ax = fig.add_axes([0.03, legend_bottom_px / FIG_H_PX, 0.94, legend_h_px / FIG_H_PX])
-        cbar = fig.colorbar(im, cax=cbar_ax, orientation="horizontal", ticks=bounds)
-        cbar.ax.tick_params(colors="black", labelsize=7)
-        cbar.outline.set_edgecolor("black")
-        cbar.ax.set_facecolor("white")
-
-        # Für pmsl nur jeden 10. hPa Tick beschriften
-        if var_type=="pmsl":
-            tick_labels = [str(tick) if tick % 8 == 0 else "" for tick in bounds]
-            cbar.set_ticklabels(tick_labels)
-        if var_type=="pmsl_eu":
-            tick_labels = [str(tick) if tick % 8 == 0 else "" for tick in bounds]
-            cbar.set_ticklabels(tick_labels)
-        if var_type == "t2m":
-            tick_labels = [str(tick) if tick % 4 == 0 else "" for tick in bounds]
-            cbar.set_ticklabels(tick_labels)
-        if var_type == "t2m_eu":
-            tick_labels = [str(tick) if tick % 4 == 0 else "" for tick in bounds]
-            cbar.set_ticklabels(tick_labels)
-        if var_type == "geo_eu":
-            tick_labels = [str(tick) if tick % 80 == 0 else "" for tick in bounds]
-            cbar.set_ticklabels(tick_labels)
-
-        if var_type=="tp_acc":
-            cbar.set_ticklabels([int(tick) if float(tick).is_integer() else tick for tick in tp_acc_bounds])
-        if var_type=="snow":
-            cbar.set_ticklabels([int(tick) if float(tick).is_integer() else tick for tick in snow_bounds])
-    else:
-        add_ww_legend_bottom(fig, ww_categories, ww_colors_base)
-
-    # Footer
-    footer_ax = fig.add_axes([0.0, (legend_bottom_px + legend_h_px)/FIG_H_PX, 1.0,
-                            (BOTTOM_AREA_PX - legend_h_px - legend_bottom_px)/FIG_H_PX])
-    footer_ax.axis("off")
-    footer_texts = {
-        "ww": "Signifikantes Wetter",
-        "ww_eu": "Signifikantes Wetter, Europa",
-        "t2m": "Temperatur 2m (°C)",
-        "t2m_eu": "Temperatur 2m (°C), Europa",
-        "tp_acc": "Akkumulierter Niederschlag (mm)",
-        "wind": "Windböen (km/h)",
-        "wind_eu": "Windböen (km/h), Europa",
-        "pmsl": "Luftdruck auf Meereshöhe (hPa)",
-        "pmsl_eu": "Luftdruck auf Meereshöhe (hPa), Europa",
-        "geo_eu": "Geopotentielle Höhe 500hPa (m), Europa",
-        "snow": "Schneehöhe (cm)"
-    }
-
-    if run_time_utc is not None:
-        left_text = footer_texts.get(var_type, var_type) + f"\nIFS ({pd.to_datetime(run_time_utc).hour:02d}z), ECMWF"
-    else:
-        left_text = footer_texts.get(var_type, var_type) + "\nIFS (??z), ECMWF"
-
-    # Haupttitel im Footer
-    footer_ax.text(0.01, 0.85, left_text, fontsize=12, fontweight="bold",
-                va="top", ha="left")
-
-    # 🔽 Neuer kleiner Hinweistext darunter
-    footer_ax.text(
-        0.01, 0.30,  # etwas tiefer als der Haupttext
-        "Dieser Service basiert auf Daten und Produkten des Europäischen Zentrums "
-        "für mittelfristige Wettervorhersagen (ECMWF).",
-        fontsize=8, color="black", va="top", ha="left"
-    )
-
-    footer_ax.text(0.734, 0.92, "Prognose für:", fontsize=12,
-                va="top", ha="left", fontweight="bold")
-    footer_ax.text(0.99, 0.68, f"{valid_time_local:%d.%m.%Y %H:%M} Uhr",
-                fontsize=12, va="top", ha="right", fontweight="bold")
-
-    # Speichern
-    outname = f"{var_type}_{valid_time_local:%Y%m%d_%H%M}.png"
-    plt.savefig(os.path.join(output_dir, outname), dpi=100, bbox_inches=None, pad_inches=0)
-    plt.close()
+            print(f"{filename} t_idx={t_idx} -> {outname}")
