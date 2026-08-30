@@ -377,7 +377,7 @@ for filename in matching_files:
             # ------------------------------
             # Transparentes WebP speichern
             # ------------------------------
-            outname = f"{var_type}_{valid_times_utc[t_idx].astimezone(ZoneInfo('Europe/Berlin')):%Y%m%d_%H%M}.webp""
+            outname = f"{var_type}_{valid_times_utc[t_idx].astimezone(ZoneInfo('Europe/Berlin')):%Y%m%d_%H%M}.webp"
             out_path = os.path.join(output_dir, outname)
             save_transparent_webp(render_data_merc, cmap, norm, out_path)
 
