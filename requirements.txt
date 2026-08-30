@@ -1,22 +1,8 @@
-# Kernbibliotheken
-xarray
-cfgrib
-pandas
-matplotlib
-cartopy
-geopandas
-shapely
-adjustText
+# Open-Meteo .om Dateiformat
+omfiles
 
-# ECMWF Open Data Client
-ecmwf-opendata
-
-# Weitere nützliche Helfer
-pyproj
-rasterio
-scipy
+# Bildverarbeitung / Reprojektion
 numpy
+scipy
+matplotlib
 pillow
-
-# Damit cfgrib GRIB-Dateien lesen kann (über eccodes)
-eccodes
