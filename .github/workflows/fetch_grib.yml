@@ -40,32 +40,39 @@ jobs:
             07|08|09|11|12) RUN=00 ;;
             19|20|21|22) RUN=12 ;;
           esac
+          YEAR=$(date -u +%Y)
+          MONTH=$(date -u +%m)
+          DAY=$(date -u +%d)
           DATE=$(date -u +%Y%m%d)
           # set env variables
           echo "RUN=$RUN" >> $GITHUB_ENV
+          echo "YEAR=$YEAR" >> $GITHUB_ENV
+          echo "MONTH=$MONTH" >> $GITHUB_ENV
+          echo "DAY=$DAY" >> $GITHUB_ENV
           echo "DATE=$DATE" >> $GITHUB_ENV
           # set step output for job output
           echo "run=$RUN" >> $GITHUB_OUTPUT
 
-      - name: Download Grib2
+      - name: Download OM files from Open-Meteo S3 (t2m, wind, tp)
         run: |
-          python downloads/2t.py &
-          python downloads/msl.py &
-          python downloads/ptype.py &
-          python downloads/gh.py &
-          wait
-          python downloads/tp_acc.py &
-          python downloads/snow.py &
-          python downloads/wind.py &
-          wait
+          mkdir -p data/t2m data/wind data/tp
+
+          BASE_URL="https://openmeteo.s3.amazonaws.com/data_run/ecmwf_ifs025/${YEAR}/${MONTH}/${DAY}/${RUN}00Z"
+
+          echo "Lade von: $BASE_URL"
+
+          curl -fSL "${BASE_URL}/temperature_2m.om" -o "data/t2m/temperature_2m.om"
+          curl -fSL "${BASE_URL}/wind_gusts_10m.om" -o "data/wind/wind_gusts_10m.om"
+          curl -fSL "${BASE_URL}/precipitation.om"  -o "data/tp/precipitation.om"
+
           
-      - name: Upload GRIB2 as artifact
+      - name: Upload data as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: grib2
+          name: om-file
           path: data/
 
-      - name: Delete GRIB2 files (local cleanup)
+      - name: Delete data files (local cleanup)
         run: rm -rf data/
 
 
@@ -74,8 +81,8 @@ jobs:
     needs: fetch_and_generate
     strategy:
       matrix:
-        variable: [t2m, ww, pmsl_eu, pmsl, geo_eu, ww_eu, t2m_eu, tp_acc, snow, wind, wind_eu]
-      max-parallel: 11
+        variable: [t2m, wind, tp]
+      max-parallel: 3
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v3
@@ -91,25 +98,15 @@ jobs:
       - name: Download GRIB2 artifact
         uses: actions/download-artifact@v4
         with:
-          name: grib2
+          name: om-file
           path: data/
 
       - name: Generate PNGs for ${{ matrix.variable }}
         run: |
           mkdir -p ifs/${{ matrix.variable }}
           input_dir="data/${{ matrix.variable }}"
-          if [ "${{ matrix.variable }}" = "pmsl_eu" ]; then
-            input_dir="data/pmsl"
-          elif [ "${{ matrix.variable }}" = "geo_eu" ]; then
-            input_dir="data/geo"
-          elif [ "${{ matrix.variable }}" = "ww_eu" ]; then
-            input_dir="data/ww"
-          elif [ "${{ matrix.variable }}" = "t2m_eu" ]; then
-            input_dir="data/t2m"
-          elif [ "${{ matrix.variable }}" = "wind_eu" ]; then
-            input_dir="data/wind"
-          fi
-          python scripts/generate_pngs.py \
+          script="scripts/generate_pngs.py"
+          python "$script" \
             "$input_dir" \
             ifs/${{ matrix.variable }} \
             ${{ matrix.variable }}
